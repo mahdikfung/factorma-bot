@@ -245,31 +245,49 @@ def save_items(invoice_id, items):
         conn.close()
 
 # ---------- PDF generation ----------
+def _is_merged_cell(ws, cell_ref):
+    """Check if cell_ref is inside any merged range, return the top-left cell coordinate if so."""
+    for merged_range in ws.merged_cells.ranges:
+        if cell_ref in merged_range:
+            # Return the top-left cell (min_row, min_col)
+            return f"{ws.cell(row=merged_range.min_row, column=merged_range.min_col).coordinate}"
+    return None
+
+
+def safe_write(ws, cell_ref, value):
+    """Write value to cell_ref, handling merged cells by writing to the top-left cell of the merge."""
+    target = _is_merged_cell(ws, cell_ref)
+    if target:
+        ws[target] = value
+    else:
+        ws[cell_ref] = value
+
+
 def generate_invoice_pdf(data):
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
-    # Buyer info
-    ws["B11"] = data["customer_name"]
-    ws["D11"] = data.get("customer_state", "")
-    ws["F11"] = data.get("customer_city", "")
-    ws["H11"] = data.get("customer_address", "")
-    ws["F14"] = data["customer_phone"]
+    # Buyer info (cells from template)
+    safe_write(ws, "B11", data["customer_name"])
+    safe_write(ws, "D11", data.get("customer_state", ""))
+    safe_write(ws, "F11", data.get("customer_city", ""))
+    safe_write(ws, "H11", data.get("customer_address", ""))
+    safe_write(ws, "F14", data["customer_phone"])
 
     # Date and serial
-    ws["F2"] = str(data["invoice_number"])
-    ws["B4"] = data["date_shamsi"]
+    safe_write(ws, "F2", str(data["invoice_number"]))
+    safe_write(ws, "B4", data["date_shamsi"])
 
-    # Items
+    # Items rows 16..(16+n-1)
     start_row = 16
     for i, item in enumerate(data["items"]):
         r = start_row + i
-        ws[f"B{r}"] = i + 1
-        ws[f"C{r}"] = item["description"]
-        ws[f"D{r}"] = item["quantity"]
-        ws[f"E{r}"] = item["unit"]
-        ws[f"F{r}"] = item["unit_price"]
-        ws[f"G{r}"] = int(item["quantity"] * item["unit_price"])
+        safe_write(ws, f"B{r}", i + 1)
+        safe_write(ws, f"C{r}", item["description"])
+        safe_write(ws, f"D{r}", item["quantity"])
+        safe_write(ws, f"E{r}", item["unit"])
+        safe_write(ws, f"F{r}", item["unit_price"])
+        safe_write(ws, f"G{r}", int(item["quantity"] * item["unit_price"]))
 
     tmp_dir = tempfile.mkdtemp()
     try:
