@@ -266,28 +266,33 @@ def safe_write(ws, cell_ref, value):
 def generate_invoice_pdf(data):
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
+    # Set RTL direction for the sheet
+    ws.sheet_view.rightToLeft = True
 
-    # Buyer info (cells from template)
-    safe_write(ws, "B11", data["customer_name"])
-    safe_write(ws, "D11", data.get("customer_state", ""))
-    safe_write(ws, "F11", data.get("customer_city", ""))
-    safe_write(ws, "H11", data.get("customer_address", ""))
-    safe_write(ws, "F14", data["customer_phone"])
+    # Serial number and date
+    safe_write(ws, "B3", str(data["invoice_number"]))
+    safe_write(ws, "E3", data["date_shamsi"])
 
-    # Date and serial
-    safe_write(ws, "F2", str(data["invoice_number"]))
-    safe_write(ws, "B4", data["date_shamsi"])
+    # Buyer (خریدار) info
+    safe_write(ws, "D13", data["customer_name"])
+    safe_write(ws, "H14", data.get("customer_economic_code", ""))
+    safe_write(ws, "H15", data.get("customer_national_id", ""))
+    safe_write(ws, "D16", data.get("customer_state", ""))
+    safe_write(ws, "F16", data.get("customer_city", ""))
+    safe_write(ws, "D17", data.get("customer_address", ""))
+    safe_write(ws, "H17", data["customer_phone"])
 
-    # Items rows 16..(16+n-1)
-    start_row = 16
+    # Items rows starting at row 21
+    start_row = 21
     for i, item in enumerate(data["items"]):
         r = start_row + i
-        safe_write(ws, f"B{r}", i + 1)
-        safe_write(ws, f"C{r}", item["description"])
-        safe_write(ws, f"D{r}", item["quantity"])
-        safe_write(ws, f"E{r}", item["unit"])
-        safe_write(ws, f"F{r}", item["unit_price"])
-        safe_write(ws, f"G{r}", int(item["quantity"] * item["unit_price"]))
+        safe_write(ws, f"A{r}", i + 1)          # ردیف
+        safe_write(ws, f"B{r}", item["description"])  # شرح
+        safe_write(ws, f"C{r}", item["quantity"])     # تعداد
+        safe_write(ws, f"D{r}", item["unit"])         # واحد
+        safe_write(ws, f"E{r}", item["unit_price"])   # قیمت واحد
+        # If template has total column at F, write it
+        safe_write(ws, f"F{r}", int(item["quantity"] * item["unit_price"]))
 
     tmp_dir = tempfile.mkdtemp()
     try:
@@ -754,14 +759,39 @@ async def show_customer_list_page(update_or_query, context):
     else:
         await update_or_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
+# ---- Customer list: text search handler (State.CUSTOMER_LIST) ----
 async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text search for customer list. Called when user types a name in CUSTOMER_LIST state."""
+    query_text = update.message.text.strip()
+    context.user_data["list_search"] = query_text
+    context.user_data["list_page"] = 0
+    await show_customer_list_page(update, context)
+    return State.CUSTOMER_LIST
+
+
+# ---- Customer page: callback query handler (State.CUSTOMER_PAGE) ----
+async def customer_page_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle pagination, view customer, back from customer list page."""
     query = update.callback_query
-    if query.data == "back_to_main":
+    if not query:
+        return State.CUSTOMER_PAGE
+    await query.answer()
+    data = query.data
+
+    if data == "back_to_main":
         context.user_data.clear()
         await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_kb())
         return State.MAIN_MENU
-    if query.data.startswith("list_page_"):
-        direction = query.data.split("_")[-1]
+
+    if data == "back_to_list":
+        context.user_data["list_mode"] = "customer"
+        context.user_data["list_search"] = ""
+        context.user_data["list_page"] = 0
+        await show_customer_list_page(query, context)
+        return State.CUSTOMER_PAGE
+
+    if data.startswith("list_page_"):
+        direction = data.split("_")[-1]
         page = context.user_data.get("list_page", 0)
         if direction == "+1":
             page += 1
@@ -770,8 +800,9 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["list_page"] = page
         await show_customer_list_page(query, context)
         return State.CUSTOMER_PAGE
-    if query.data.startswith("viewcust_"):
-        cust_id = int(query.data.split("_", 1)[1])
+
+    if data.startswith("viewcust_"):
+        cust_id = int(data.split("_", 1)[1])
         cust = get_customer(cust_id)
         if not cust:
             await query.edit_message_text("مشتری یافت نشد.", reply_markup=back_to_main_kb())
@@ -779,8 +810,9 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["viewing_customer_id"] = cust_id
         await view_customer_handler(update, context)
         return State.VIEW_CUSTOMER
-    if query.data.startswith("viewinv_"):
-        inv_id = int(query.data.split("_", 1)[1])
+
+    if data.startswith("viewinv_"):
+        inv_id = int(data.split("_", 1)[1])
         conn = get_conn()
         try:
             with conn.cursor() as cur:
@@ -859,6 +891,7 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             await query.edit_message_text(f"خطا در ارسال PDF: {e}", reply_markup=back_to_main_kb())
         return State.MAIN_MENU
+
     return State.CUSTOMER_PAGE
 
 async def view_customer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1039,7 +1072,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, customer_list_handler)
             ],
             State.CUSTOMER_PAGE: [
-                CallbackQueryHandler(customer_list_handler)
+                CallbackQueryHandler(customer_page_handler)
             ],
             State.VIEW_CUSTOMER: [
                 CallbackQueryHandler(view_customer_handler)
