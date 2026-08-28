@@ -1,25 +1,23 @@
 FROM python:3.11-slim
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# نصب LibreOffice و فونت‌های مورد نیاز برای فارسی
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     libreoffice \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
+# کپی و نصب کتابخانه‌های پایتون
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
+# کپی تمام فایل‌های پروژه به ریشه /app
 COPY . .
 
-# Create directory for invoices if not exists
+# ساخت پوشه فاکتورها
 RUN mkdir -p /app/invoices
 
-# Expose port (not needed for bot, but good practice)
-# EXPOSE 8080
-
-# Run the bot
-CMD ["python", "bot/main.py"]
+# اجرای فایل main.py که الان در ریشه قرار داره
+CMD ["python", "main.py"]
