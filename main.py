@@ -61,7 +61,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     EDIT_CUSTOMER_VALUE,
 ) = range(22)
 
-ITEMS_PER_PAGE = 2  # per request: 2 per page
+ITEMS_PER_PAGE = 20  # per request: 2 per page
 
 # ---------- DB helpers ----------
 def get_conn():
