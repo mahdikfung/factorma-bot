@@ -1,19 +1,15 @@
 import logging
 import os
-import sqlite3
+from enum import IntEnum, auto
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    ConversationHandler, ContextTypes, filters
+    ConversationHandler, ContextTypes, filters,
 )
 from openpyxl import load_workbook
 import jdatetime
-import os
 import psycopg2
-import psycopg2.extras
-from urllib.parse import urlparse
-import jdatetime
 import tempfile
 import shutil
 import subprocess
@@ -26,42 +22,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------- Constants & Paths ----------
-ROOT = Path(__file__).resolve().parent.parent
-# Template path as requested: absolute inside container /app/فاکتور رسمی مهدی خواجه.xlsx
 TEMPLATE_PATH = Path("/app/فاکتور رسمی مهدی خواجه.xlsx")
 OUTPUT_DIR = Path("/app/invoices")
-DB_DSN = os.getenv("DATABASE_URL")  # e.g. postgres://user:pass@host:port/db
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_DSN = os.getenv("DATABASE_URL")
 if not DB_DSN:
     raise RuntimeError("DATABASE_URL environment variable not set")
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+ITEMS_PER_PAGE = 2  # 2 customers per page (per request)
 
-# ---------- Conversation States ----------
-(
-    MAIN_MENU,
-    NEW_INVOICE_MENU,
-    ENTER_NEW_CUSTOMER_NAME,
-    ENTER_NEW_CUSTOMER_STATE,
-    ENTER_NEW_CUSTOMER_CITY,
-    ENTER_NEW_CUSTOMER_ADDRESS,
-    ENTER_NEW_CUSTOMER_PHONE,
-    ENTER_SEARCH_NAME,
-    SELECT_EXISTING_CUSTOMER,
-    ENTER_ITEM_DESC,
-    ENTER_ITEM_QTY,
-    ENTER_ITEM_UNIT,
-    ENTER_ITEM_PRICE,
-    ASK_MORE_ITEMS,
-    ENTER_DATE_SHAMSI,
-    REVIEW_INVOICE,
-    CUSTOMER_LIST,
-    CUSTOMER_PAGE,
-    VIEW_CUSTOMER,
-    EDIT_CUSTOMER_FIELD,
-    EDIT_CUSTOMER_VALUE,
-) = range(22)
-
-ITEMS_PER_PAGE = 20  # per request: 2 per page
+# ---------- Conversation States (IntEnum) ----------
+class State(IntEnum):
+    MAIN_MENU = auto()
+    NEW_INVOICE_MENU = auto()
+    ENTER_NEW_CUSTOMER_NAME = auto()
+    ENTER_NEW_CUSTOMER_STATE = auto()
+    ENTER_NEW_CUSTOMER_CITY = auto()
+    ENTER_NEW_CUSTOMER_ADDRESS = auto()
+    ENTER_NEW_CUSTOMER_PHONE = auto()
+    ENTER_SEARCH_NAME = auto()
+    SELECT_EXISTING_CUSTOMER = auto()
+    ENTER_DATE_SHAMSI = auto()
+    ENTER_ITEM_DESC = auto()
+    ENTER_ITEM_QTY = auto()
+    ENTER_ITEM_UNIT = auto()
+    ENTER_ITEM_PRICE = auto()
+    ASK_MORE_ITEMS = auto()
+    REVIEW_INVOICE = auto()
+    CUSTOMER_LIST = auto()
+    CUSTOMER_PAGE = auto()
+    VIEW_CUSTOMER = auto()
+    EDIT_CUSTOMER_FIELD = auto()
+    EDIT_CUSTOMER_VALUE = auto()
 
 # ---------- DB helpers ----------
 def get_conn():
@@ -150,8 +143,7 @@ def search_customers(query):
                     """,
                     (f"%{query}%",),
                 )
-            rows = cur.fetchall()
-            return rows
+            return cur.fetchall()
     finally:
         conn.close()
 
@@ -206,8 +198,7 @@ def get_customer_invoices(cust_id):
                 """,
                 (cust_id,),
             )
-            rows = cur.fetchall()
-            return rows
+            return cur.fetchall()
     finally:
         conn.close()
 
@@ -258,7 +249,7 @@ def generate_invoice_pdf(data):
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
-    # Buyer info (full)
+    # Buyer info
     ws["B11"] = data["customer_name"]
     ws["D11"] = data.get("customer_state", "")
     ws["F11"] = data.get("customer_city", "")
@@ -269,7 +260,7 @@ def generate_invoice_pdf(data):
     ws["F2"] = str(data["invoice_number"])
     ws["B4"] = data["date_shamsi"]
 
-    # Items rows 16..(16+n-1)
+    # Items
     start_row = 16
     for i, item in enumerate(data["items"]):
         r = start_row + i
@@ -326,18 +317,6 @@ def back_to_main_kb():
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]
     ])
 
-def pagination_kb(current_page, total_pages, base_callback):
-    kb = []
-    nav = []
-    if current_page > 0:
-        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"{base_callback}_page_{current_page-1}"))
-    if current_page < total_pages - 1:
-        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"{base_callback}_page_{current_page+1}"))
-    if nav:
-        kb.append(nav)
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(kb)
-
 # ---------- Handlers ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -345,7 +324,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "خوش آمدید. لطفاً یک گزینه را انتخاب کنید:",
         reply_markup=main_menu_kb(),
     )
-    return MAIN_MENU
+    return State.MAIN_MENU
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -358,10 +337,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("مشتری قبلی", callback_data="existing_customer")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")],
         ])
-        await query.edit_message_text(
-            "آیا مشتری جدید است یا مشتری قبلی؟", reply_markup=kb
-        )
-        return NEW_INVOICE_MENU
+        await query.edit_message_text("آیا مشتری جدید است یا مشتری قبلی؟", reply_markup=kb)
+        return State.NEW_INVOICE_MENU
 
     if data == "old_invoices":
         await query.edit_message_text(
@@ -370,7 +347,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")]
             ]),
         )
-        return ENTER_SEARCH_NAME
+        return State.ENTER_SEARCH_NAME
 
     if data == "customer_list":
         await query.edit_message_text(
@@ -380,12 +357,12 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]),
         )
         context.user_data["list_mode"] = "customer"
-        return CUSTOMER_LIST
+        return State.CUSTOMER_LIST
 
     if data == "back_to_main":
         context.user_data.clear()
         await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_kb())
-        return MAIN_MENU
+        return State.MAIN_MENU
 
 # ---- New invoice flow ----
 async def new_invoice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -396,59 +373,59 @@ async def new_invoice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "new_customer":
         context.user_data["invoice"] = {"is_new": True, "items": []}
         await query.edit_message_text("نام و نام خانوادگی مشتری جدید را وارد کنید:")
-        return ENTER_NEW_CUSTOMER_NAME
+        return State.ENTER_NEW_CUSTOMER_NAME
 
     if data == "existing_customer":
         context.user_data["invoice"] = {"is_new": False, "items": []}
         await query.edit_message_text("نام مشتری قبلی را برای جستجو وارد کنید:")
-        return ENTER_SEARCH_NAME
+        return State.ENTER_SEARCH_NAME
 
     if data == "back_to_main":
         context.user_data.clear()
         await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_kb())
-        return MAIN_MENU
+        return State.MAIN_MENU
 
 async def enter_new_customer_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     if not name:
         await update.message.reply_text("نام نمی‌تواند خالی باشد. دوباره وارد کنید:")
-        return ENTER_NEW_CUSTOMER_NAME
+        return State.ENTER_NEW_CUSTOMER_NAME
     context.user_data["invoice"]["customer_name"] = name
     await update.message.reply_text("استان را وارد کنید:")
-    return ENTER_NEW_CUSTOMER_STATE
+    return State.ENTER_NEW_CUSTOMER_STATE
 
 async def enter_new_customer_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = update.message.text.strip()
     if not state:
         await update.message.reply_text("استان نمی‌تواند خالی باشد. دوباره وارد کنید:")
-        return ENTER_NEW_CUSTOMER_STATE
+        return State.ENTER_NEW_CUSTOMER_STATE
     context.user_data["invoice"]["customer_state"] = state
     await update.message.reply_text("شهر را وارد کنید:")
-    return ENTER_NEW_CUSTOMER_CITY
+    return State.ENTER_NEW_CUSTOMER_CITY
 
 async def enter_new_customer_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = update.message.text.strip()
     if not city:
         await update.message.reply_text("شهر نمی‌تواند خالی باشد. دوباره وارد کنید:")
-        return ENTER_NEW_CUSTOMER_CITY
+        return State.ENTER_NEW_CUSTOMER_CITY
     context.user_data["invoice"]["customer_city"] = city
     await update.message.reply_text("نشانی را وارد کنید:")
-    return ENTER_NEW_CUSTOMER_ADDRESS
+    return State.ENTER_NEW_CUSTOMER_ADDRESS
 
 async def enter_new_customer_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = update.message.text.strip()
     if not address:
         await update.message.reply_text("نشانی نمی‌تواند خالی باشد. دوباره وارد کنید:")
-        return ENTER_NEW_CUSTOMER_ADDRESS
+        return State.ENTER_NEW_CUSTOMER_ADDRESS
     context.user_data["invoice"]["customer_address"] = address
-    await update.message.reply_text("شماره telephone مشتری را وارد کنید:")
-    return ENTER_NEW_CUSTOMER_PHONE
+    await update.message.reply_text("شماره تلفن مشتری را وارد کنید:")
+    return State.ENTER_NEW_CUSTOMER_PHONE
 
 async def enter_new_customer_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text.strip()
     if not phone:
-        await update.message.reply_text("شماره telephone نمی‌تواند خالی باشد. دوباره وارد کنید:")
-        return ENTER_NEW_CUSTOMER_PHONE
+        await update.message.reply_text("شماره تلفن نمی‌تواند خالی باشد. دوباره وارد کنید:")
+        return State.ENTER_NEW_CUSTOMER_PHONE
     context.user_data["invoice"]["customer_phone"] = phone
     inv = context.user_data["invoice"]
     cust_id = create_customer(
@@ -460,29 +437,27 @@ async def enter_new_customer_phone(update: Update, context: ContextTypes.DEFAULT
     )
     inv["customer_id"] = cust_id
     inv["invoice_number"] = get_next_invoice_number()
-    # Ask for date manually
     await update.message.reply_text(
         "تاریخ فاکتور را به صورت شمسی وارد کنید (مثال: 1405/06/06):"
     )
-    return ENTER_DATE_SHAMSI
+    return State.ENTER_DATE_SHAMSI
 
 async def enter_date_shamsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date_text = update.message.text.strip()
-    # simple validation
     parts = date_text.split("/")
     if len(parts) != 3 or not all(p.isdigit() for p in parts):
         await update.message.reply_text("تاریخ نامعتبر است. مثال: 1405/06/06")
-        return ENTER_DATE_SHAMSI
+        return State.ENTER_DATE_SHAMSI
     context.user_data["invoice"]["date_shamsi"] = date_text
     context.user_data["current_item"] = {}
     await update.message.reply_text("کالای اول را وارد کنید - شرح کالا چیست؟")
-    return ENTER_ITEM_DESC
+    return State.ENTER_ITEM_DESC
 
 async def enter_search_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     if not name:
         await update.message.reply_text("نام نمی‌تواند خالی باشد.")
-        return ENTER_SEARCH_NAME
+        return State.ENTER_SEARCH_NAME
     rows = search_customers(name)
     if not rows:
         await update.message.reply_text(
@@ -491,11 +466,11 @@ async def enter_search_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")]
             ]),
         )
-        return ENTER_SEARCH_NAME
+        return State.ENTER_SEARCH_NAME
     context.user_data["search_results"] = rows
     context.user_data["search_page"] = 0
     await show_customer_page(update, context)
-    return SELECT_EXISTING_CUSTOMER
+    return State.SELECT_EXISTING_CUSTOMER
 
 async def show_customer_page(update_or_query, context):
     results = context.user_data.get("search_results", [])
@@ -529,7 +504,7 @@ async def select_existing_customer(update: Update, context: ContextTypes.DEFAULT
     if data == "back_to_main":
         context.user_data.clear()
         await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_kb())
-        return MAIN_MENU
+        return State.MAIN_MENU
     if data.startswith("search_page_"):
         direction = data.split("_")[-1]
         page = context.user_data.get("search_page", 0)
@@ -539,13 +514,13 @@ async def select_existing_customer(update: Update, context: ContextTypes.DEFAULT
             page = max(page - 1, 0)
         context.user_data["search_page"] = page
         await show_customer_page(query, context)
-        return SELECT_EXISTING_CUSTOMER
+        return State.SELECT_EXISTING_CUSTOMER
     if data.startswith("pickcust_"):
         cust_id = int(data.split("_", 1)[1])
         cust = get_customer(cust_id)
         if not cust:
             await query.edit_message_text("مشتری یافت نشد.", reply_markup=back_to_main_kb())
-            return MAIN_MENU
+            return State.MAIN_MENU
         inv = context.user_data["invoice"]
         inv["customer_id"] = cust["id"]
         inv["customer_name"] = cust["name"]
@@ -554,22 +529,22 @@ async def select_existing_customer(update: Update, context: ContextTypes.DEFAULT
         inv["customer_address"] = cust["address"]
         inv["customer_phone"] = cust["phone"]
         inv["invoice_number"] = get_next_invoice_number()
-        await update.message.reply_text(
+        await query.edit_message_text(
             f"مشتری انتخاب شد: {cust['name']}\n\n"
             f"تاریخ فاکتور را به صورت شمسی وارد کنید (مثال: 1405/06/06):"
         )
-        return ENTER_DATE_SHAMSI
-    return SELECT_EXISTING_CUSTOMER
+        return State.ENTER_DATE_SHAMSI
+    return State.SELECT_EXISTING_CUSTOMER
 
 # ---- Items flow ----
 async def enter_item_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     if not desc:
         await update.message.reply_text("شرح کالا نمی‌تواند خالی باشد.")
-        return ENTER_ITEM_DESC
+        return State.ENTER_ITEM_DESC
     context.user_data["current_item"] = {"description": desc}
     await update.message.reply_text("تعداد کالا را وارد کنید (مثال: 5):")
-    return ENTER_ITEM_QTY
+    return State.ENTER_ITEM_QTY
 
 async def enter_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -579,19 +554,19 @@ async def enter_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError
     except ValueError:
         await update.message.reply_text("عدد معتبر وارد کنید (مثلاً 5 یا 2.5):")
-        return ENTER_ITEM_QTY
+        return State.ENTER_ITEM_QTY
     context.user_data["current_item"]["quantity"] = qty
     await update.message.reply_text("واحد کالا را وارد کنید (مثال: عدد، کیلو، متر):")
-    return ENTER_ITEM_UNIT
+    return State.ENTER_ITEM_UNIT
 
 async def enter_item_unit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     unit = update.message.text.strip()
     if not unit:
         await update.message.reply_text("واحد نمی‌تواند خالی باشد.")
-        return ENTER_ITEM_UNIT
+        return State.ENTER_ITEM_UNIT
     context.user_data["current_item"]["unit"] = unit
     await update.message.reply_text("قیمت واحد را به ریال وارد کنید (مثال: 150000):")
-    return ENTER_ITEM_PRICE
+    return State.ENTER_ITEM_PRICE
 
 async def enter_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().replace(",", "").replace("،", "")
@@ -601,7 +576,7 @@ async def enter_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError
     except ValueError:
         await update.message.reply_text("عدد معتبر وارد کنید (مثال: 150000):")
-        return ENTER_ITEM_PRICE
+        return State.ENTER_ITEM_PRICE
     item = context.user_data["current_item"]
     item["unit_price"] = price
     item["total_price"] = int(item["quantity"] * price)
@@ -617,19 +592,18 @@ async def enter_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "می‌خواهید کالای دیگری اضافه کنید؟",
         reply_markup=kb,
     )
-    return ASK_MORE_ITEMS
+    return State.ASK_MORE_ITEMS
 
 async def ask_more_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "add_more":
         await query.edit_message_text("شرح کالای جدید را وارد کنید:")
-        return ENTER_ITEM_DESC
+        return State.ENTER_ITEM_DESC
     if query.data == "cancel_invoice":
         context.user_data.clear()
         await query.edit_message_text("فاکتور لغو شد.", reply_markup=main_menu_kb())
-        return MAIN_MENU
-    # finish_items
+        return State.MAIN_MENU
     inv = context.user_data["invoice"]
     items = inv["items"]
     lines = []
@@ -658,7 +632,7 @@ async def ask_more_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❌ انصراف", callback_data="cancel_invoice")],
     ])
     await query.edit_message_text(msg, reply_markup=kb)
-    return REVIEW_INVOICE
+    return State.REVIEW_INVOICE
 
 async def review_invoice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -667,13 +641,12 @@ async def review_invoice_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == "cancel_invoice":
         context.user_data.clear()
         await query.edit_message_text("فاکتور لغو شد.", reply_markup=main_menu_kb())
-        return MAIN_MENU
+        return State.MAIN_MENU
     if data == "edit_items":
         context.user_data["invoice"]["items"] = []
         context.user_data["current_item"] = {}
         await query.edit_message_text("کالاها پاک شدند. شرح کالای اول را وارد کنید:")
-        return ENTER_ITEM_DESC
-    # confirm
+        return State.ENTER_ITEM_DESC
     inv = context.user_data["invoice"]
     pdf_data = {
         "customer_name": inv["customer_name"],
@@ -690,11 +663,11 @@ async def review_invoice_handler(update: Update, context: ContextTypes.DEFAULT_T
         pdf_path = generate_invoice_pdf(pdf_data)
     except subprocess.TimeoutExpired:
         await query.edit_message_text("تبدیل PDF بیش از حد طول کشید. دوباره تلاش کنید.")
-        return REVIEW_INVOICE
+        return State.REVIEW_INVOICE
     except Exception as e:
         logger.exception("PDF generation failed")
         await query.edit_message_text(f"خطا در ساخت PDF: {e}")
-        return REVIEW_INVOICE
+        return State.REVIEW_INVOICE
 
     total = sum(int(it["quantity"] * it["unit_price"]) for it in inv["items"])
     inv_id = save_invoice(
@@ -702,7 +675,6 @@ async def review_invoice_handler(update: Update, context: ContextTypes.DEFAULT_T
         inv["customer_id"], total, pdf_path,
     )
     save_items(inv_id, inv["items"])
-    # Send PDF
     with open(pdf_path, "rb") as f:
         await context.bot.send_document(
             chat_id=query.message.chat_id,
@@ -714,7 +686,7 @@ async def review_invoice_handler(update: Update, context: ContextTypes.DEFAULT_T
         "✅ فاکتور با موفقیت ساخته و ارسال شد.",
         reply_markup=main_menu_kb(),
     )
-    return MAIN_MENU
+    return State.MAIN_MENU
 
 # ---- Customer list & pagination ----
 async def show_customer_list_page(update_or_query, context):
@@ -734,7 +706,7 @@ async def show_customer_list_page(update_or_query, context):
         title = "لیست مشتریان"
         item_txt = lambda r: f"{r[1]} - {r[5]}"
         cb_prefix = "viewcust"
-    else:  # invoice history for a customer
+    else:
         cust_id = context.user_data.get("hist_cust_id")
         rows = get_customer_invoices(cust_id)
         title = f"تاریخچه فاکتورهای مشتری: {context.user_data.get('hist_cust_name','')}"
@@ -769,7 +741,7 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if query.data == "back_to_main":
         context.user_data.clear()
         await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_kb())
-        return MAIN_MENU
+        return State.MAIN_MENU
     if query.data.startswith("list_page_"):
         direction = query.data.split("_")[-1]
         page = context.user_data.get("list_page", 0)
@@ -779,16 +751,16 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
             page = max(page - 1, 0)
         context.user_data["list_page"] = page
         await show_customer_list_page(query, context)
-        return CUSTOMER_PAGE
+        return State.CUSTOMER_PAGE
     if query.data.startswith("viewcust_"):
         cust_id = int(query.data.split("_", 1)[1])
         cust = get_customer(cust_id)
         if not cust:
             await query.edit_message_text("مشتری یافت نشد.", reply_markup=back_to_main_kb())
-            return MAIN_MENU
+            return State.MAIN_MENU
         context.user_data["viewing_customer_id"] = cust_id
         await view_customer_handler(update, context)
-        return VIEW_CUSTOMER
+        return State.VIEW_CUSTOMER
     if query.data.startswith("viewinv_"):
         inv_id = int(query.data.split("_", 1)[1])
         conn = get_conn()
@@ -803,14 +775,13 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
             conn.close()
         if not row:
             await query.edit_message_text("فاکتور یافت نشد.", reply_markup=back_to_main_kb())
-            return MAIN_MENU
+            return State.MAIN_MENU
         inv_number, date_shamsi, file_path = row
-        # Prefer existing PDF; if missing, regenerate (should rarely happen)
+        # Prefer existing PDF
         if not file_path or not os.path.exists(file_path):
             existing = get_existing_pdf(inv_number, date_shamsi)
             if existing:
                 file_path = existing
-                # Update DB path
                 conn = get_conn()
                 try:
                     with conn.cursor() as cur:
@@ -822,7 +793,7 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 finally:
                     conn.close()
             else:
-                # Need to regenerate from DB
+                # Regenerate from DB
                 conn = get_conn()
                 try:
                     with conn.cursor() as cur:
@@ -837,12 +808,7 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
                             )
                             items_rows = cur.fetchall()
                             items = [
-                                {
-                                    "description": d,
-                                    "quantity": q,
-                                    "unit": u,
-                                    "unit_price": up,
-                                }
+                                {"description": d, "quantity": q, "unit": u, "unit_price": up}
                                 for d, q, u, up in items_rows
                             ]
                             pdf_data = {
@@ -864,7 +830,6 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
                                 conn.commit()
                 finally:
                     conn.close()
-        # Send PDF
         try:
             with open(file_path, "rb") as f:
                 await context.bot.send_document(
@@ -875,8 +840,8 @@ async def customer_list_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text("PDF ارسال شد.")
         except Exception as e:
             await query.edit_message_text(f"خطا در ارسال PDF: {e}", reply_markup=back_to_main_kb())
-        return MAIN_MENU
-    return CUSTOMER_PAGE
+        return State.MAIN_MENU
+    return State.CUSTOMER_PAGE
 
 async def view_customer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -885,13 +850,13 @@ async def view_customer_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "back_to_main":
         context.user_data.clear()
         await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_kb())
-        return MAIN_MENU
+        return State.MAIN_MENU
     if data.startswith("viewcust_"):
         cust_id = int(data.split("_", 1)[1])
         cust = get_customer(cust_id)
         if not cust:
             await query.edit_message_text("مشتری یافت نشد.", reply_markup=back_to_main_kb())
-            return MAIN_MENU
+            return State.MAIN_MENU
         context.user_data["viewing_customer_id"] = cust_id
         msg = (
             f"👤 اطلاعات مشتری:\n\n"
@@ -911,8 +876,8 @@ async def view_customer_handler(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="back_to_list")],
         ])
         await query.edit_message_text(msg, reply_markup=kb)
-        return EDIT_CUSTOMER_FIELD
-    return VIEW_CUSTOMER
+        return State.EDIT_CUSTOMER_FIELD
+    return State.VIEW_CUSTOMER
 
 async def customer_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -923,20 +888,19 @@ async def customer_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["list_search"] = ""
         context.user_data["list_page"] = 0
         await show_customer_list_page(query, context)
-        return CUSTOMER_LIST
+        return State.CUSTOMER_LIST
     if data == "history_invoices":
         cust_id = context.user_data.get("viewing_customer_id")
         cust = get_customer(cust_id)
         if not cust:
             await query.edit_message_text("مشتری یافت نشد.", reply_markup=back_to_main_kb())
-            return MAIN_MENU
+            return State.MAIN_MENU
         context.user_data["hist_cust_id"] = cust_id
         context.user_data["hist_cust_name"] = cust["name"]
         context.user_data["list_mode"] = "history"
         context.user_data["list_page"] = 0
         await show_customer_list_page(query, context)
-        return CUSTOMER_PAGE
-    # edit field
+        return State.CUSTOMER_PAGE
     field_map = {
         "edit_name": "name",
         "edit_state": "state",
@@ -946,13 +910,13 @@ async def customer_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE
     }
     field = field_map.get(data)
     if not field:
-        return EDIT_CUSTOMER_FIELD
+        return State.EDIT_CUSTOMER_FIELD
     context.user_data["edit_field"] = field
     cust_id = context.user_data.get("viewing_customer_id")
     cust = get_customer(cust_id)
     cur = cust.get(field, "")
-    await query.edit_message_text(f"مقدار جدید برای {field} را وارد کنید (حالي: {cur}):")
-    return EDIT_CUSTOMER_VALUE
+    await query.edit_message_text(f"مقدار جدید برای {field} را وارد کنید (فعلی: {cur}):")
+    return State.EDIT_CUSTOMER_VALUE
 
 async def customer_save_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_value = update.message.text.strip()
@@ -960,10 +924,10 @@ async def customer_save_edit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     field = context.user_data.get("edit_field")
     if not cust_id or not field:
         await update.message.reply_text("خطا. دوباره شروع کنید.", reply_markup=main_menu_kb())
-        return MAIN_MENU
+        return State.MAIN_MENU
     if not new_value:
         await update.message.reply_text("مقدار نمی‌تواند خالی باشد. دوباره وارد کنید:")
-        return EDIT_CUSTOMER_VALUE
+        return State.EDIT_CUSTOMER_VALUE
     cust = get_customer(cust_id)
     if field == "name":
         update_customer(cust_id, new_value, cust["state"], cust["city"], cust["address"], cust["phone"])
@@ -975,7 +939,6 @@ async def customer_save_edit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         update_customer(cust_id, cust["name"], cust["state"], cust["city"], new_value, cust["phone"])
     elif field == "phone":
         update_customer(cust_id, cust["name"], cust["state"], cust["city"], cust["address"], new_value)
-    # Refresh view
     cust = get_customer(cust_id)
     msg = (
         f"👤 اطلاعات مشتری (به‌روز شد):\n\n"
@@ -995,13 +958,13 @@ async def customer_save_edit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="back_to_list")],
     ])
     await update.message.reply_text(msg, reply_markup=kb)
-    return VIEW_CUSTOMER
+    return State.VIEW_CUSTOMER
 
 # ---- Cancel ----
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("عملیات لغو شد.", reply_markup=main_menu_kb())
-    return MAIN_MENU
+    return State.MAIN_MENU
 
 # ---------- Main ----------
 def main():
@@ -1014,59 +977,59 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
-            MAIN_MENU: [CallbackQueryHandler(main_menu_handler)],
-            NEW_INVOICE_MENU: [CallbackQueryHandler(new_invoice_menu)],
-            ENTER_NEW_CUSTOMER_NAME: [
+            State.MAIN_MENU: [CallbackQueryHandler(main_menu_handler)],
+            State.NEW_INVOICE_MENU: [CallbackQueryHandler(new_invoice_menu)],
+            State.ENTER_NEW_CUSTOMER_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_new_customer_name)
             ],
-            ENTER_NEW_CUSTOMER_STATE: [
+            State.ENTER_NEW_CUSTOMER_STATE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_new_customer_state)
             ],
-            ENTER_NEW_CUSTOMER_CITY: [
+            State.ENTER_NEW_CUSTOMER_CITY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_new_customer_city)
             ],
-            ENTER_NEW_CUSTOMER_ADDRESS: [
+            State.ENTER_NEW_CUSTOMER_ADDRESS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_new_customer_address)
             ],
-            ENTER_NEW_CUSTOMER_PHONE: [
+            State.ENTER_NEW_CUSTOMER_PHONE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_new_customer_phone)
             ],
-            ENTER_SEARCH_NAME: [
+            State.ENTER_SEARCH_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_search_name)
             ],
-            SELECT_EXISTING_CUSTOMER: [
+            State.SELECT_EXISTING_CUSTOMER: [
                 CallbackQueryHandler(select_existing_customer)
             ],
-            ENTER_ITEM_DESC: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_desc)
-            ],
-            ENTER_ITEM_QTY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_qty)
-            ],
-            ENTER_ITEM_UNIT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_unit)
-            ],
-            ENTER_ITEM_PRICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_price)
-            ],
-            ASK_MORE_ITEMS: [CallbackQueryHandler(ask_more_items)],
-            ENTER_DATE_SHAMSI: [
+            State.ENTER_DATE_SHAMSI: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_date_shamsi)
             ],
-            REVIEW_INVOICE: [CallbackQueryHandler(review_invoice_handler)],
-            CUSTOMER_LIST: [
+            State.ENTER_ITEM_DESC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_desc)
+            ],
+            State.ENTER_ITEM_QTY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_qty)
+            ],
+            State.ENTER_ITEM_UNIT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_unit)
+            ],
+            State.ENTER_ITEM_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_item_price)
+            ],
+            State.ASK_MORE_ITEMS: [CallbackQueryHandler(ask_more_items)],
+            State.REVIEW_INVOICE: [CallbackQueryHandler(review_invoice_handler)],
+            State.CUSTOMER_LIST: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, customer_list_handler)
             ],
-            CUSTOMER_PAGE: [
+            State.CUSTOMER_PAGE: [
                 CallbackQueryHandler(customer_list_handler)
             ],
-            VIEW_CUSTOMER: [
+            State.VIEW_CUSTOMER: [
                 CallbackQueryHandler(view_customer_handler)
             ],
-            EDIT_CUSTOMER_FIELD: [
+            State.EDIT_CUSTOMER_FIELD: [
                 CallbackQueryHandler(customer_edit_field)
             ],
-            EDIT_CUSTOMER_VALUE: [
+            State.EDIT_CUSTOMER_VALUE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, customer_save_edit)
             ],
         },
